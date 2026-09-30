@@ -27,6 +27,7 @@ pub struct Proposal {
     pub created_at: u64,
     pub expires_at: u64,
     pub executed: bool,
+    pub rejected: bool,
 }
 
 #[contracttype]
@@ -53,6 +54,13 @@ pub struct ProposalApprovedEvent {
     pub proposal_id: u64,
     pub approver: Address,
     pub approvals: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProposalRejectedEvent {
+    pub proposal_id: u64,
+    pub rejecter: Address,
 }
 
 #[contracttype]
@@ -127,6 +135,7 @@ impl MultisigAdminContract {
             created_at: now,
             expires_at: now.saturating_add(EXPIRY_SECONDS),
             executed: false,
+            rejected: false,
         };
 
         env.events().publish(
@@ -165,6 +174,9 @@ impl MultisigAdminContract {
         }
         if proposal.executed {
             panic!("proposal already executed");
+        }
+        if proposal.rejected {
+            panic!("proposal already rejected");
         }
         if caller == proposal.proposer {
             panic!("proposer cannot approve twice");
@@ -233,10 +245,14 @@ impl MultisigAdminContract {
     }
 
     fn require_admin(env: &Env, caller: &Address) {
-        let admins: Vec<Address> = env.storage().instance().get(&DataKey::Admins).unwrap();
-        if !Self::contains_address(&admins, caller) {
+        if !Self::is_admin(env, caller) {
             panic!("Not admin");
         }
+    }
+
+    fn is_admin(env: &Env, caller: &Address) -> bool {
+        let admins: Vec<Address> = env.storage().instance().get(&DataKey::Admins).unwrap();
+        Self::contains_address(&admins, caller)
     }
 
     fn contains_address(list: &Vec<Address>, addr: &Address) -> bool {
@@ -254,6 +270,9 @@ impl MultisigAdminContract {
 
     fn maybe_execute(env: &Env, proposal: &mut Proposal) {
         if proposal.executed {
+            return;
+        }
+        if proposal.rejected {
             return;
         }
         if proposal.approvals.len() < THRESHOLD {
