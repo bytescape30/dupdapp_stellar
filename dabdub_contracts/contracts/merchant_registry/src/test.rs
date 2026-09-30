@@ -265,17 +265,59 @@ fn test_merchants_listing_still_includes_terminated_merchants() {
 }
 
 // ---------------------------------------------------------------------------
-// transfer_admin
-// ---------------------------------------------------------------------------
+// transfer_admin (two-step: propose_admin + accept_admin)
 
 #[test]
-fn test_transfer_admin_happy_path() {
+fn test_propose_admin_does_not_take_effect_until_accepted() {
     let (env, client, admin) = setup();
     let new_admin = Address::generate(&env);
 
-    client.transfer_admin(&admin, &new_admin);
+    client.propose_admin(&admin, &new_admin);
+
+    // Current admin remains in control until the pending admin accepts.
+    assert_eq!(client.get_admin(), admin);
+}
+
+#[test]
+fn test_accept_admin_completes_transfer() {
+    let (env, client, admin) = setup();
+    l
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_propose_admin_does_not_take_effect_until_accepted() {
+    let (env, client, admin) = setup();
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+
+    // Current admin remains in control until the pending admin accepts.
+    assert_eq!(client.get_admin(), admin);
+}
+
+#[test]
+fn test_accept_admin_completes_transfer() {
+    let (env, client, admin) = setup();
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+    client.accept_admin(&new_admin);
 
     assert_eq!(client.get_admin(), new_admin);
+}
+
+#[test]
+fn test_propose_admin_can_be_corrected_before_acceptance() {
+    let (env, client, admin) = setup();
+    let wrong_admin = Address::generate(&env);
+    let correct_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &wrong_admin);
+    // Re-propose with the corrected address before anyone accepts.
+    client.propose_admin(&admin, &correct_admin);
+    client.accept_admin(&correct_admin);
+
+    assert_eq!(client.get_admin(), correct_admin);
 }
 
 #[test]
@@ -284,10 +326,41 @@ fn test_transfer_admin_updates_merchant_ops() {
     let new_admin = Address::generate(&env);
     let merchant = Address::generate(&env);
 
-    client.transfer_admin(&admin, &new_admin);
+    client.propose_admin(&admin, &new_admin);
+    client.accept_admin(&new_admin);
     client.register_merchant(&new_admin, &merchant, &sample_name(&env));
 
     let record = client.get_merchant(&merchant);
-    assert_eq!
+    assert_eq!(record.merchant, merchant);
+    assert_eq!(record.status, MerchantStatus::Active);
+}
 
-/* … truncated 9238 chars — edit only what you need near the top … */
+#[test]
+#[should_panic(expected = "Not admin")]
+fn test_propose_admin_unauthorized() {
+    let (env, client, _admin) = setup();
+    let attacker = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&attacker, &new_admin);
+}
+
+#[test]
+#[should_panic(expected = "No pending admin")]
+fn test_accept_admin_without_proposal_fails() {
+    let (env, client, _admin) = setup();
+    let new_admin = Address::generate(&env);
+
+    client.accept_admin(&new_admin);
+}
+
+#[test]
+#[should_panic(expected = "Not pending admin")]
+fn test_accept_admin_wrong_caller_fails() {
+    let (env, client, admin) = setup();
+    let new_admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+    client.accept_admin(&attacker);
+}
