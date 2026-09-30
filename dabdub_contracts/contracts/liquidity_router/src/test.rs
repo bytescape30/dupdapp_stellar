@@ -98,6 +98,19 @@ fn test_check_and_route_panics_for_unapproved_pool() {
     client.check_and_route(&pool, &1_000);
 }
 
+/// A pool that no longer implements `AmmInterface` (e.g. after an upgrade):
+/// it has no `get_reserves` entrypoint at all, so any cross-contract call to
+/// it reverts. Used to verify graceful fallback instead of an uncontrolled panic.
+#[contract]
+pub struct BrokenAmm;
+
+#[contractimpl]
+impl BrokenAmm {
+    pub fn something_else(_env: Env) -> u32 {
+        0
+    }
+}
+
 #[test]
 fn test_deep_pool_routing() {
     let (env, client, admin) = setup();
@@ -246,4 +259,59 @@ fn test_admin_and_approved_pools_live_in_instance_storage() {
     assert!(!persistent.has(&DataKey::Admin));
     assert!(!persistent.has(&DataKey::ApprovedPools));
 }
+}
+
+#[test]
+#[should_panic(expected = "invalid pool reserves")]
+fn test_negative_reserves_rejected() {
+    let env = Env::default();
+    let pool_address = env.register_contract(None, MockAmm);
+    let router_id = env.register_contract(None, LiquidityRouter);
+    let router_client = LiquidityRouterClient::new(&env, &router_id);
+
+    // A misbehaving pool returns a negative reserve
+    let amm_client = MockAmmClient::new(&env, &pool_address);
+    amm_client.set_reserves(&-100i128, &100i128);
+
+    router_client.check_and_route(&pool_address, &50i128);
+}
+
+#[test]
+#[should_panic(expected = "invalid pool reserves")]
+fn test_zero_reserves_rejected() {
+    let env = Env::default();
+    let pool_address = env.register_contract(None, MockAmm);
+    let router_id = env.register_contract(None, LiquidityRouter);
+    let router_client = LiquidityRouterClient::new(&env, &router_id);
+
+    // A pool with zero reserves is nonsensical and must be rejected
+    let amm_client = MockAmmClient::new(&env, &pool_address);
+    amm_client.set_reserves(&0i128, &100i128);
+
+    router_client.check_and_route(&pool_address, &50i128);
+}
+
+#[test]
+fn test_reverting_pool_falls_back_to_classic_dex() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    // An approved pool that no longer implements `AmmInterface` (e.g. upgraded
+    // to a contract without `get_reserves`). Calling `get_reserves` on it reverts.
+    let pool_address = env.register_contract(None, BrokenAmm);
+    let router_id = env.register_contract(None, LiquidityRouter);
+    let router_client = LiquidityRouterClient::new(&env, &router_id);
+
+    // A failed `get_reserves` call must be treated the same as a shallow pool:
+    // fall back to `Route::StellarClassicDEX` instead of panicking the whole call.
+    let route = router_client.check_and_route(&pool_address, &50i128);
+    assert_eq!(route, Route::StellarClassicDEX);
+
+    // The fallback path emits the same event as the depth-based fallback.
+    let events = env.events().all();
+    assert!(events.len() >= 1);
+
+    let event = events.last().unwrap();
+    assert_eq!(event.0, router_id);
+    assert_eq!(event.1.len(), 1);
 }
