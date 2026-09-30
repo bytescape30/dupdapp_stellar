@@ -2,7 +2,7 @@
 
 mod test;
 
-use soroban_sdk::{contract, contractimpl, contracttype, vec, Address, Env, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Vec};
 
 const LEDGERS_PER_30_DAYS: u32 = 172_800;
 const BPS_DENOMINATOR: i128 = 10_000;
@@ -27,6 +27,7 @@ pub enum DataKey {
     SettlementCaller,
     Admin,
     FeeTiers,
+    MinFeeStroops,
     MerchantVolume(Address),
 }
 
@@ -56,6 +57,7 @@ impl FeeCalculatorContract {
         Self::validate_tiers(&tiers);
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::FeeTiers, &tiers);
+        env.storage().instance().set(&DataKey::MinFeeStroops, &0i128);
     }
 
     pub fn set_fee_tiers(env: Env, caller: Address, tiers: Vec<FeeTier>) {
@@ -76,10 +78,19 @@ impl FeeCalculatorContract {
     pub fn set_settlement_caller(env: Env, caller: Address, settlement_caller: Address) {
         caller.require_auth();
         Self::require_admin(&env, &caller);
-        env.storage().instance().set(&DataKey::SettlementCaller, &settlement_caller);
+        env.storage()
+            .instance()
+            .set(&DataKey::SettlementCaller, &settlement_caller);
     }
 
-    pub fn set_settlement_caller(env: Env, caller: Address, settlement_caller: Address) {
+    pub fn get_settlement_caller(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::SettlementCaller)
+    }
+
+    pub fn set_min_fee_stroops(env: Env, caller: Address, min_fee_stroops: i128) {
+        caller.require_auth();
+        Self::require_admin(&env, &caller);
+        if 
         caller.require_auth();
         Self::require_admin(&env, &caller);
         env.storage()
@@ -91,11 +102,37 @@ impl FeeCalculatorContract {
         env.storage().instance().get(&DataKey::SettlementCaller)
     }
 
+    pub fn set_min_fee_stroops(env: Env, caller: Address, min_fee_stroops: i128) {
+        caller.require_auth();
+        Self::require_admin(&env, &caller);
+        if min_fee_stroops < 0 {
+            panic!("min_fee_stroops must be >= 0");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MinFeeStroops, &min_fee_stroops);
+    }
+
+    pub fn get_min_fee_stroops(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MinFeeStroops)
+            .unwrap_or(0)
+    }
+
+    pub fn set_settlement_caller(env: Env, caller: Address, settlement_caller: Address) {
+        caller.require_auth();
+        Self::require_admin(&env, &caller);
+        env.storage().instance().set(&DataKey::SettlementCaller, &settlement_caller);
+    }
+
     pub fn get_fee_tiers(env: Env) -> Vec<FeeTier> {
+        // `__constructor` always validates and stores `FeeTiers`, so for any
+        // live contract instance the tiers are guaranteed to be present.
         env.storage()
             .instance()
             .get(&DataKey::FeeTiers)
-            .unwrap_or(vec![&env, FeeTier { threshold_usdc: 0, fee_bps: 0 }])
+            .expect("tiers not initialized")
     }
 
     pub fn calculate_fee(
@@ -114,11 +151,24 @@ impl FeeCalculatorContract {
         let volume = Self::update_and_get_volume(&env, &merchant, amount);
         let fee_bps = Self::select_fee_bps(&env, volume);
 
-        let fee = amount
+        let mut fee = amount
             .checked_mul(fee_bps as i128)
             .expect("overflow")
             .checked_div(BPS_DENOMINATOR)
             .expect("division failure");
+
+        let min_fee_stroops: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinFeeStroops)
+            .unwrap_or(0);
+        if fee < min_fee_stroops {
+            fee = min_fee_stroops;
+        }
+        if fee > amount {
+            fee = amount;
+        }
+
         let net = amount.checked_sub(fee).expect("underflow");
 
         env.events().publish(

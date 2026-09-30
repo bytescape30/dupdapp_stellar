@@ -44,7 +44,10 @@ impl FeeDistributorContract {
     }
 
     /// Splits `total_fee` between treasury and LP atomically.
-    /// Caller must have pre-approved this contract to transfer `total_fee` tokens.
+    ///
+    /// The caller's `require_auth()` (satisfied by the outer contract invocation
+    /// being signed by them) is what authorizes `token.transfer` to move funds
+    /// out of their account. No separate `approve` step is needed.
     pub fn distribute(env: Env, caller: Address, total_fee: i128) {
         caller.require_auth();
         assert!(total_fee > 0, "total_fee must be > 0");
