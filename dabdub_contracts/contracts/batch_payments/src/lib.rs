@@ -3,7 +3,8 @@
 mod test;
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, vec, xdr::ToXdr, Address, Bytes, BytesN, Env, String, Vec,
+    contract, contractclient, contractimpl, contracttype, vec, xdr::ToXdr, Address, BytesN, Env,
+    String, Vec,
 };
 
 const MAX_BATCH_SIZE: u32 = 20;
@@ -15,6 +16,7 @@ enum DataKey {
     MinAmount,
     MaxAmount,
     Counter,
+    RegistryContract,
 }
 
 /// A single payment input in the batch.
@@ -39,6 +41,14 @@ pub struct PaymentRecord {
     pub amount: i128,
     pub memo: String,
     pub merchant: Address,
+    pub customer: Option<Address>,
+}
+
+/// Thin client interface for the MerchantRegistry contract.
+#[contractclient(name = "MerchantRegistryClient")]
+#[allow(dead_code)]
+trait MerchantRegistry {
+    fn is_approved(env: Env, merchant: Address) -> bool;
 }
 
 #[contract]
@@ -89,6 +99,45 @@ impl BatchPaymentContract {
         );
     }
 
+    /// Set or clear the optional merchant registry used to gate create_batch.
+    /// Admin-only.
+    pub fn set_registry(env: Env, registry: Option<Address>) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic!("contract not initialized"));
+        admin.require_auth();
+
+        match registry {
+            Some(reg) => env.storage().instance().set(&DataKey::RegistryContract, &reg),
+            None => env.storage().instance().remove(&DataKey::RegistryContract),
+        }
+    }
+
+    /// Returns the currently configured registry contract address, if any.
+    pub fn get_registry(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::RegistryContract)
+    }
+
+    /// Transfer admin rights to a new address. Current admin only.
+    pub fn transfer_admin(env: Env, caller: Address, new_admin: Address) {
+        caller.require_auth();
+        let current_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic!("contract not initialized"));
+        if caller != current_admin {
+            panic!("caller is not the admin");
+        }
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "AdminTransferred"),),
+            (caller, new_admin),
+        );
+    }
+
     /// Create up to 20 payments atomically in a single contract invocation.
     ///
     /// Validates every input before any state is written — if any item is
@@ -102,6 +151,18 @@ impl BatchPaymentContract {
         payments: Vec<PaymentInput>,
     ) -> Vec<BytesN<32>> {
         merchant.require_auth();
+
+        // Gate on merchant registry when one is configured.
+        if let Some(registry_addr) = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::RegistryContract)
+        {
+            let registry_client = MerchantRegistryClient::new(&env, &registry_addr);
+            if !registry_client.is_approved(&merchant) {
+                panic!("merchant is not approved in the registry");
+            }
+        }
 
         let min_amount: i128 = env
             .storage()
@@ -135,12 +196,6 @@ impl BatchPaymentContract {
 
         // ── Creation pass ─────────────────────────────────────────────────────
         let mut payment_ids: Vec<BytesN<32>> = vec![&env];
-        let counter: u64 = env.storage().instance().get(&DataKey::Counter).unwrap();
-
-        // Issue #1024: a monotonically increasing per-contract counter,
-        // hashed together with the merchant and payment contents, so two
-        // merchants (or the same merchant twice) landing in the same ledger
-        // can never derive the same payment ID.
         let mut counter: u64 = env
             .storage()
             .instance()
@@ -164,7 +219,13 @@ impl BatchPaymentContract {
             // Emit PaymentCreated event — one per batch entry.
             env.events().publish(
                 (soroban_sdk::Symbol::new(&env, "PaymentCreated"),),
-                (id_bytes.clone(), merchant.clone(), item.amount, item.memo.clone()),
+                (
+                    id_bytes.clone(),
+                    merchant.clone(),
+                    item.amount,
+                    item.memo.clone(),
+                    item.customer.clone(),
+                ),
             );
 
             payment_ids.push_back(id_bytes);
