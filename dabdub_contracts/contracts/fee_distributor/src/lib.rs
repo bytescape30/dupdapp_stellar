@@ -36,6 +36,13 @@ impl FeeDistributorContract {
         usdc_token: Address,
     ) {
         assert!(lp_share_bps >= 0 && lp_share_bps <= BPS_DENOM, "bps out of range");
+        assert!(treasury != lp_address, "treasury and lp_address must differ");
+        assert!(admin != treasury, "admin and treasury must differ");
+        assert!(admin != lp_address, "admin and lp_address must differ");
+        let contract_address = env.current_contract_address();
+        assert!(treasury != contract_address, "treasury must not be the contract address");
+        assert!(lp_address != contract_address, "lp_address must not be the contract address");
+        assert!(admin != contract_address, "admin must not be the contract address");
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Treasury, &treasury);
         env.storage().instance().set(&DataKey::LpAddress, &lp_address);

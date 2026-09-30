@@ -111,3 +111,87 @@ fn test_update_addresses() {
     assert_eq!(s.token.balance(&s.treasury), 0);
     assert_eq!(s.token.balance(&s.lp), 0);
 }
+
+/// `distribute` intentionally has NO caller allowlist: any address holding the
+/// token may call it and have its own funds split between treasury and LP.
+/// This test mints tokens to a second, unrelated address (distinct from the
+/// pre-minted `caller` in `setup()`) and calls `distribute` from it, asserting
+/// the current unrestricted behavior explicitly. If a future change adds a
+/// caller restriction, this test must be updated deliberately — making any
+/// access-control change a conscious, test-visible decision.
+#[test]
+fn test_distribute_from_unrelated_caller_is_unrestricted() {
+    let s = setup(5_000); // 50% LP
+
+    // A second, unrelated address that is not the pre-minted `caller`.
+    let unrelated = Address::generate(&s.env);
+    assert_ne!(unrelated, s.caller);
+
+    // Fund the unrelated caller so distribute() can pull from them.
+    let sac = StellarAssetClient::new(&s.env, &s.token.address);
+    sac.mint(&unrelated, &10_000);
+
+    // No caller allowlist: an unrelated caller can distribute their own funds.
+    s.client.distribute(&unrelated, &10_000);
+
+    assert_eq!(s.token.balance(&s.lp), 5_000);
+    assert_eq!(s.token.balance(&s.treasury), 5_000);
+    // The unrelated caller's funds were consumed by the distribution.
+    assert_eq!(s.token.balance(&unrelated), 0);
+    // The original pre-minted caller was not touched.
+    assert_eq!(s.token.balance(&s.caller), 1_000_000);
+}
+
+#[test]
+#[should_panic(expected = "treasury and lp_address must differ")]
+fn test_constructor_rejects_treasury_equal_lp() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let shared = Address::generate(&env);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+
+    env.register(
+        FeeDistributorContract,
+        (&admin, &shared, &shared, 5_000i128, &token_id.address()),
+    );
+}
+
+#[test]
+#[should_panic(expected = "admin must differ from treasury")]
+fn test_constructor_rejects_admin_equal_treasury() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let shared = Address::generate(&env);
+    let lp = Address::generate(&env);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+
+    env.register(
+        FeeDistributorContract,
+        (&shared, &shared, &lp, 5_000i128, &token_id.address()),
+    );
+}
+
+#[test]
+#[should_panic(expected = "admin must differ from lp_address")]
+fn test_constructor_rejects_admin_equal_lp() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let treasury = Address::generate(&env);
+    let shared = Address::generate(&env);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+
+    env.register(
+        FeeDistributorContract,
+        (&shared, &treasury, &shared, 5_000i128, &token_id.address()),
+    );
+}
