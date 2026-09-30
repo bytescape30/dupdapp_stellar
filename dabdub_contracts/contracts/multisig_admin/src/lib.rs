@@ -4,6 +4,16 @@ mod test;
 
 use soroban_sdk::{contract, contractimpl, contracttype, vec, Address, Bytes, Env, String, Vec};
 
+/// Minimum number of approvals required before a proposal auto-executes.
+///
+/// SECURITY INVARIANT: `THRESHOLD` must NEVER be less than 2. Both `propose`
+/// and `approve` call `maybe_execute`, which auto-executes as soon as
+/// `proposal.approvals.len() >= THRESHOLD`. A fresh proposal already carries a
+/// single approval (the proposer), so a threshold of 1 would let a lone proposer
+/// immediately self-execute every proposal, silently defeating the entire
+/// multisig premise. If this constant is ever made configurable, the setter
+/// MUST enforce `assert!(new_threshold >= 2)`.
+const THRESHOLD: u32 = 2;
 const EXPIRY_SECONDS: u64 = 24 * 60 * 60; // 24 hours
 
 #[contracttype]
@@ -52,6 +62,27 @@ pub struct ProposalExecutedEvent {
     pub operation: String,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProposalPrunedEvent {
+    pub proposal_id: u64,
+}
+
+/// Multisig admin **attestation / signaling** contract.
+///
+/// IMPORTANT: This contract does NOT execute proposals against any real
+/// contract state. The `operation` and `args` fields carried by a [`Proposal`]
+/// are opaque, caller-supplied metadata: they are stored and echoed back in
+/// events, but they are NEVER interpreted, decoded, or dispatched as a
+/// cross-contract call anywhere in this contract. Marking a proposal as
+/// `executed` (see [`MultisigAdminContract::maybe_execute`]) only flips a
+/// signaling flag and emits a `proposal_executed` event.
+///
+/// Applying the real effect described by `operation`/`args` is the
+/// responsibility of an external, off-chain relayer that watches for the
+/// `proposal_executed` event and performs the corresponding action itself.
+/// Integrators MUST NOT assume that an `executed` proposal has already changed
+/// any on-chain state.
 #[contract]
 pub struct MultisigAdminContract;
 
@@ -77,7 +108,10 @@ impl MultisigAdminContract {
 
         let mut next_id: u64 = env.storage().instance().get(&DataKey::NextProposalId).unwrap_or(0);
         let proposal_id = next_id;
-        next_id = next_id.saturating_add(1);
+        // Use checked arithmetic so that exhausting the u64 id space fails
+        // loudly instead of silently reusing an id (which would overwrite an
+        // existing stored Proposal at the same key).
+        next_id = next_id.checked_add(1).expect("proposal id overflow");
         env.storage().instance().set(&DataKey::NextProposalId, &next_id);
 
         let now = env.ledger().timestamp();
@@ -105,6 +139,9 @@ impl MultisigAdminContract {
             },
         );
 
+        // A fresh proposal holds only the proposer's approval, so with the
+        // required THRESHOLD >= 2 it cannot auto-execute here. See the
+        // THRESHOLD invariant above.
         Self::maybe_execute(&env, &mut proposal);
         env.storage()
             .persistent()
@@ -146,8 +183,41 @@ impl MultisigAdminContract {
             },
         );
 
+        // Auto-executes only once approvals reach THRESHOLD (>= 2), which
+        // requires at least one distinct approver beyond the proposer.
         Self::maybe_execute(&env, &mut proposal);
         env.storage().persistent().set(&key, &proposal);
+    }
+
+    /// Removes an expired, never-executed proposal from persistent storage.
+    ///
+    /// Permissionless: expiry is objectively checkable on-chain via
+    /// `env.ledger().timestamp() > proposal.expires_at`, matching the check
+    /// used by `approve`/`maybe_execute`. This lets anyone reclaim the rent
+    /// and footprint of proposals that expired without reaching [`THRESHOLD`].
+    ///
+    /// Panics if the proposal does not exist, has already been executed, or
+    /// has not yet expired — so live or executed proposals can never be pruned.
+    pub fn prune_expired_proposal(env: Env, proposal_id: u64) {
+        let key = DataKey::Proposal(proposal_id);
+        let proposal: Proposal = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("proposal not found");
+
+        if proposal.executed {
+            panic!("proposal already executed");
+        }
+        if env.ledger().timestamp() <= proposal.expires_at {
+            panic!("proposal not expired");
+        }
+
+        env.storage().persistent().remove(&key);
+        env.events().publish(
+            ("MULTISIG", "proposal_pruned"),
+            ProposalPrunedEvent { proposal_id },
+        );
     }
 
     pub fn get_admins(env: Env) -> Vec<Address> {
@@ -178,12 +248,15 @@ impl MultisigAdminContract {
         false
     }
 
-    fn has_approved(approvals: &Vec<Address>, caller: &Address) -> bool {
-        Self::contains_address(approvals, caller)
+    fn has_approved(approvals: &Vec<Address>, addr: &Address) -> bool {
+        Self::contains_address(approvals, addr)
     }
 
     fn maybe_execute(env: &Env, proposal: &mut Proposal) {
         if proposal.executed {
+            return;
+        }
+        if proposal.approvals.len() < THRESHOLD {
             return;
         }
         if env.ledger().timestamp() > proposal.expires_at {
@@ -201,6 +274,15 @@ impl MultisigAdminContract {
                 },
             );
         }
+
+        proposal.executed = true;
+        env.events().publish(
+            ("MULTISIG", "proposal_executed"),
+            ProposalExecutedEvent {
+                proposal_id: proposal.id,
+                operation: proposal.operation.clone(),
+            },
+        );
     }
 
     fn apply_operation(env: &Env, proposal: &Proposal) {
