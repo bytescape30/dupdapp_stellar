@@ -4,8 +4,10 @@ mod test;
 
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Vec};
 
-/// Admin roles. Admin accounts are stored separately from merchant accounts,
-/// so a merchant JWT/address is never accepted on admin-gated operations.
+/// Admin roles. Admin accounts are stored separately from merchant accounts
+/// as a deployment convention — the contract itself does not cross-check
+/// against a merchant registry, so the separation is upheld by the caller
+/// (e.g. the off-chain deployment script) rather than enforced on-chain.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum AdminRole {
@@ -39,6 +41,13 @@ struct AdminAddedEvent {
 #[contracttype]
 struct AdminRevokedEvent {
     admin: Address,
+}
+
+#[contracttype]
+struct AdminRoleChangedEvent {
+    admin: Address,
+    old_role: AdminRole,
+    new_role: AdminRole,
 }
 
 #[contracttype]
@@ -76,20 +85,43 @@ impl AdminAuthContract {
     }
 
     /// Add an admin to the separate credential store. SuperAdmin only.
+    /// If the address is already an admin, its role is updated and a distinct
+    /// `AdminRoleChangedEvent` is emitted instead of `AdminAddedEvent`, so
+    /// off-chain consumers can distinguish new grants from privilege changes.
     pub fn add_admin(env: Env, caller: Address, admin: Address, role: AdminRole) {
         caller.require_auth();
         Self::require_super_admin(&env, &caller);
-        let is_new = !env.storage().persistent().has(&DataKey::Admin(admin.clone()));
-        Self::save(
-            &env,
-            AdminUser {
-                admin: admin.clone(),
-                role: role.clone(),
-                active: true,
-            },
-        );
-        // Add to index only if not already present
-        if is_new {
+        let existing: Option<AdminUser> = env.storage().persistent().get(&DataKey::Admin(admin.clone()));
+        let is_new = existing.is_none();
+        if let Some(ref old_user) = existing {
+            // Role update on an existing admin — emit a distinct event.
+            Self::save(
+                &env,
+                AdminUser {
+                    admin: admin.clone(),
+                    role: role.clone(),
+                    active: old_user.active,
+                },
+            );
+            env.events().publish(
+                ("ADMIN_AUTH", "admin_role_changed"),
+                AdminRoleChangedEvent {
+                    admin,
+                    old_role: old_user.role.clone(),
+                    new_role: role,
+                },
+            );
+        } else {
+            // New admin.
+            Self::save(
+                &env,
+                AdminUser {
+                    admin: admin.clone(),
+                    role: role.clone(),
+                    active: true,
+                },
+            );
+            // Add to index only if not already present.
             let mut index: Vec<Address> = env
                 .storage()
                 .instance()
@@ -97,14 +129,15 @@ impl AdminAuthContract {
                 .unwrap_or_else(|| Vec::new(&env));
             index.push_back(admin.clone());
             env.storage().instance().set(&DataKey::AdminIndex, &index);
+            env.events().publish(
+                ("ADMIN_AUTH", "admin_added"),
+                AdminAddedEvent {
+                    admin,
+                    role,
+                },
+            );
         }
-        env.events().publish(
-            ("ADMIN_AUTH", "admin_added"),
-            AdminAddedEvent {
-                admin,
-                role,
-            },
-        );
+        let _ = is_new; // suppress unused warning
     }
 
     /// Remove an admin from the credential store. SuperAdmin only.
@@ -198,22 +231,6 @@ impl AdminAuthContract {
         env.events().publish(
             ("ADMIN_AUTH", "admin_deactivated"),
             AdminDeactivatedEvent { admin },
-        );
-    }
-
-    pub fn get_admin(env: Env, admin: Address) -> Option<AdminUser> {
-        env.storage().persistent().get(&DataKey::Admin(admin))
-    }
-
-    /// True when the address is an active admin in the store.
-    pub fn is_admin(env: Env, admin: Address) -> bool {
-        match env.storage().persistent().get::<DataKey, AdminUser>(&DataKey::Admin(admin)) {
-            Some(user) => user.active,
-            None => false,
-        }
-    }
-
-    /// Authorization gate for admin-only oper
         );
     }
 
