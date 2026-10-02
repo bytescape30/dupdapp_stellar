@@ -63,19 +63,20 @@ mod integration {
 
         // Step 3 — with mock_all_auths the multisig contract address satisfies
         // the timelock's require_admin check; schedule a real change.
+        // Use MIN_DELAY_LEDGERS (17_280) — anything less is rejected by the guard.
         let change_id = timelock.schedule_change(
             &multisig_id,
             &String::from_str(&env, "fee_rate"),
             &String::from_str(&env, "300"),
-            &1,
+            &17_280,
         );
 
         let change = timelock.get_change(&change_id);
         assert_eq!(change.status, ChangeStatus::Pending);
         assert_eq!(timelock.get_admin(), multisig_id);
 
-        // Step 4 — advance past the delay and apply via another multisig proposal.
-        env.ledger().set_sequence_number(200);
+        // Step 4 — advance past the delay (100 + 17_280 = 17_380) and apply.
+        env.ledger().set_sequence_number(17_380);
         let apply_proposal = multisig.propose(
             &admin1,
             &String::from_str(&env, "apply_change"),
