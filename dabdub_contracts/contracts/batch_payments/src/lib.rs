@@ -3,7 +3,8 @@
 mod test;
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, vec, xdr::ToXdr, Address, Bytes, BytesN, Env, String, Vec,
+    contract, contractclient, contractimpl, contracttype, vec, xdr::ToXdr, Address, BytesN, Env,
+    String, Vec,
 };
 
 const DEFAULT_MAX_BATCH_SIZE: u32 = 20;
@@ -41,6 +42,14 @@ pub struct PaymentRecord {
     pub amount: i128,
     pub memo: String,
     pub merchant: Address,
+    pub customer: Option<Address>,
+}
+
+/// Thin client interface for the MerchantRegistry contract.
+#[contractclient(name = "MerchantRegistryClient")]
+#[allow(dead_code)]
+trait MerchantRegistry {
+    fn is_approved(env: Env, merchant: Address) -> bool;
 }
 
 #[contract]
@@ -126,6 +135,18 @@ impl BatchPaymentContract {
     ) -> Vec<BytesN<32>> {
         merchant.require_auth();
 
+        // Gate on merchant registry when one is configured.
+        if let Some(registry_addr) = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::RegistryContract)
+        {
+            let registry_client = MerchantRegistryClient::new(&env, &registry_addr);
+            if !registry_client.is_approved(&merchant) {
+                panic!("merchant is not approved in the registry");
+            }
+        }
+
         let min_amount: i128 = env
             .storage()
             .instance()
@@ -201,7 +222,13 @@ impl BatchPaymentContract {
             // Emit PaymentCreated event — one per batch entry.
             env.events().publish(
                 (soroban_sdk::Symbol::new(&env, "PaymentCreated"),),
-                (id_bytes.clone(), merchant.clone(), item.amount, item.memo.clone()),
+                (
+                    id_bytes.clone(),
+                    merchant.clone(),
+                    item.amount,
+                    item.memo.clone(),
+                    item.customer.clone(),
+                ),
             );
 
             payment_ids.push_back(id_bytes);
