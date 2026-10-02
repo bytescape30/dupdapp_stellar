@@ -81,3 +81,82 @@ fn test_revoke_unknown_admin_panics() {
     let stranger = Address::generate(&env);
     client.revoke_admin(&super_admin, &stranger);
 }
+
+#[test]
+fn test_deactivate_admin() {
+    let (env, client, super_admin) = setup();
+    let admin = Address::generate(&env);
+    client.add_admin(&super_admin, &admin, &AdminRole::Admin);
+    assert!(client.is_admin(&admin));
+    client.deactivate_admin(&super_admin, &admin);
+    assert!(!client.is_admin(&admin));
+    let user = client.get_admin(&admin).unwrap();
+    assert!(!user.active);
+}
+
+#[test]
+#[should_panic(expected = "not super admin")]
+fn test_deactivate_admin_requires_super_admin() {
+    let (env, client, super_admin) = setup();
+    let admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    client.add_admin(&super_admin, &admin, &AdminRole::Admin);
+    client.deactivate_admin(&attacker, &admin);
+}
+
+#[test]
+#[should_panic(expected = "admin not found")]
+fn test_deactivate_unknown_admin_panics() {
+    let (env, client, super_admin) = setup();
+    let stranger = Address::generate(&env);
+    client.deactivate_admin(&super_admin, &stranger);
+}
+
+// Issue #1045 — re-calling add_admin for an existing admin updates role without
+// creating a second index entry and preserves the active flag.
+#[test]
+fn test_add_admin_updates_role_for_existing_admin() {
+    let (env, client, super_admin) = setup();
+    let admin = Address::generate(&env);
+
+    client.add_admin(&super_admin, &admin, &AdminRole::Admin);
+    assert_eq!(client.get_admin(&admin).unwrap().role, AdminRole::Admin);
+
+    // Re-add with a different role — should update, not duplicate.
+    client.add_admin(&super_admin, &admin, &AdminRole::SuperAdmin);
+    let user = client.get_admin(&admin).unwrap();
+    assert_eq!(user.role, AdminRole::SuperAdmin);
+    assert!(user.active);
+
+    // The admin should appear exactly once in the index (admin_count unchanged).
+    assert_eq!(client.admin_count(), 2); // super_admin + admin
+}
+
+// Issue #1046 — get_admin returns None for an address that was never added.
+#[test]
+fn test_get_admin_returns_none_for_unknown_address() {
+    let (env, client, _super_admin) = setup();
+    let stranger = Address::generate(&env);
+    assert!(client.get_admin(&stranger).is_none());
+}
+
+// Issue #1046 — revoke then re-add restores full access.
+#[test]
+fn test_revoke_then_readd_admin_restores_access() {
+    let (env, client, super_admin) = setup();
+    let admin = Address::generate(&env);
+
+    client.add_admin(&super_admin, &admin, &AdminRole::Admin);
+    assert!(client.is_admin(&admin));
+
+    client.revoke_admin(&super_admin, &admin);
+    assert!(!client.is_admin(&admin));
+    assert!(client.get_admin(&admin).is_none());
+
+    // Re-add the same address — should be treated as a brand-new admin.
+    client.add_admin(&super_admin, &admin, &AdminRole::SuperAdmin);
+    assert!(client.is_admin(&admin));
+    let user = client.get_admin(&admin).unwrap();
+    assert_eq!(user.role, AdminRole::SuperAdmin);
+    assert!(user.active);
+}
