@@ -7,6 +7,11 @@ use soroban_sdk::{contract, contractimpl, contracttype, Address, Env};
 /// Number of ledgers in a ~24h window (5s per ledger).
 const ACTIVE_WINDOW_LEDGERS: u32 = 17_280;
 
+/// TTL (in ledgers) applied to `ActiveBucket` persistent entries. Roughly two
+/// 24h windows, so the current bucket stays alive while it is being written to
+/// and is allowed to naturally expire once it is no longer current.
+const ACTIVE_BUCKET_TTL_LEDGERS: u32 = ACTIVE_WINDOW_LEDGERS * 2;
+
 /// Live platform overview metrics for the admin dashboard.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -35,6 +40,10 @@ pub enum DataKey {
     TotalPayments,
     TotalSettledVolumeUsd,
     /// Rolling count of payments in the current 24h bucket.
+    ///
+    /// Stored in `persistent()` storage with a short TTL so historical buckets
+    /// expire naturally instead of accumulating forever in the shared
+    /// `instance()` footprint.
     ActiveBucket(u32),
     PartnerOk,
 }
@@ -97,8 +106,11 @@ impl PlatformStatsContract {
 
         let bucket = env.ledger().sequence() / ACTIVE_WINDOW_LEDGERS;
         let key = DataKey::ActiveBucket(bucket);
-        let count: u32 = env.storage().instance().get(&key).unwrap_or(0);
-        env.storage().instance().set(&key, &(count + 1));
+        let count: u32 = env.storage().persistent().get(&key).unwrap_or(0);
+        env.storage().persistent().set(&key, &(count + 1));
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, ACTIVE_BUCKET_TTL_LEDGERS, ACTIVE_BUCKET_TTL_LEDGERS);
     }
 
     /// Admin-only: reflect partner API health status.
@@ -113,7 +125,7 @@ impl PlatformStatsContract {
         let bucket = env.ledger().sequence() / ACTIVE_WINDOW_LEDGERS;
         let active: u32 = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::ActiveBucket(bucket))
             .unwrap_or(0);
 
