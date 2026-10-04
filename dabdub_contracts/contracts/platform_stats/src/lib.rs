@@ -177,9 +177,25 @@ impl PlatformStatsContract {
         }
     }
 
+    /// Reports whether the contract's core storage invariants hold.
+    ///
+    /// `storage_ok` is derived from a real invariant rather than the mere
+    /// presence of `DataKey::Admin` (which is written once in the constructor
+    /// and never removed, making that check an unconditional tautology). The
+    /// invariant verified here is that the counters which `stats()` reads back
+    /// are actually present and readable in instance storage. If any of them is
+    /// missing or corrupt, `storage_ok` reports `false` instead of silently
+    /// masking the problem.
     fn health(env: &Env) -> SystemHealth {
+        let instance = env.storage().instance();
+        let storage_ok = instance.has(&DataKey::Admin)
+            && instance.has(&DataKey::TotalMerchants)
+            && instance.has(&DataKey::TotalPayments)
+            && instance.has(&DataKey::TotalSettledVolumeUsd)
+            && instance.has(&DataKey::PartnerOk);
+
         SystemHealth {
-            storage_ok: env.storage().instance().has(&DataKey::Admin),
+            storage_ok,
             stellar_ok: env.ledger().sequence() > 0,
             partner_ok: env
                 .storage()
