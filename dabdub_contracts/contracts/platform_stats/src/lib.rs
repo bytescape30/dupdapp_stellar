@@ -62,6 +62,21 @@ impl PlatformStatsContract {
 
     /// Admin-only: record a payment. If `settled`, adds to settled USD volume
     /// and increments the rolling 24h active-payments bucket.
+    ///
+    /// # Trust assumption
+    /// `amount_usd` and `settled` are caller-supplied and are NOT corroborated
+    /// on-chain against `settlement_ledger`'s independently-recorded settlement
+    /// records. This contract performs no cross-contract call to
+    /// `settlement_ledger::get_settlement` (or any equivalent) to verify that a
+    /// matching settlement exists or that the reported amount agrees with it.
+    ///
+    /// Consequently `total_settled_volume_usd` is only as trustworthy as the
+    /// admin/off-chain relayer that invokes this function: a bug or compromise
+    /// in that caller could report arbitrary figures with nothing on-chain to
+    /// catch a discrepancy. Callers MUST only pass values that have already
+    /// been validated against `settlement_ledger` off-chain. If on-chain
+    /// corroboration is required, a cross-contract verification against
+    /// `settlement_ledger` must be added before the running total is updated.
     pub fn record_payment(env: Env, caller: Address, amount_usd: i128, settled: bool) {
         caller.require_auth();
         Self::require_admin(&env, &caller);
