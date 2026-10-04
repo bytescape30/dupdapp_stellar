@@ -39,7 +39,12 @@ pub enum DataKey {
     TotalMerchants,
     TotalPayments,
     TotalSettledVolumeUsd,
-    /// Rolling count of payments in the current 24h bucket.
+    /// Count of payments recorded in a single ledger-sequence-aligned bucket.
+    ///
+    /// Buckets are fixed-size windows of `ACTIVE_WINDOW_LEDGERS` ledgers. The
+    /// rolling 24h figure reported by `stats()` is the sum of the current and
+    /// previous bucket, so a payment stays counted for at least one full window
+    /// after it is recorded.
     ///
     /// Stored in `persistent()` storage with a short TTL so historical buckets
     /// expire naturally instead of accumulating forever in the shared
@@ -121,13 +126,28 @@ impl PlatformStatsContract {
     }
 
     /// Live overview metrics, computed directly from storage.
+    ///
+    /// `active_payments_24h` is a sliding ~24h window: it sums the current
+    /// ledger-sequence-aligned bucket and the immediately preceding bucket, so
+    /// a payment recorded near the end of one bucket remains counted for at
+    /// least one full window after it is recorded instead of disappearing the
+    /// moment the bucket boundary is crossed.
     pub fn stats(env: Env) -> PlatformStats {
         let bucket = env.ledger().sequence() / ACTIVE_WINDOW_LEDGERS;
-        let active: u32 = env
+        let current: u32 = env
             .storage()
             .persistent()
             .get(&DataKey::ActiveBucket(bucket))
             .unwrap_or(0);
+        let previous: u32 = if bucket > 0 {
+            env.storage()
+                .persistent()
+                .get(&DataKey::ActiveBucket(bucket - 1))
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let active = current + previous;
 
         PlatformStats {
             total_merchants: env
